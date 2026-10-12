@@ -317,6 +317,156 @@ class BinaryCrossEntropy:
         return (sigmoid(scores) - observed) / scores.size
 
 
+def softmax(logits: ArrayLike) -> NDArray[np.float64]:
+    r"""Return row-wise softmax probabilities.
+
+    For a score matrix :math:`Z \in \mathbb{R}^{m \times K}`,
+
+    .. math::
+
+        \operatorname{softmax}(Z)_{ik}
+        = \frac{e^{z_{ik}}}{\sum_{j=1}^{K} e^{z_{ij}}}.
+
+    Each row is shifted by its maximum before the exponential, so a large
+    shared offset cannot overflow. The shift cancels in the ratio. The
+    result has the same shape as ``logits``, and each row sums to 1.
+
+    Parameters
+    ----------
+    logits : array-like of shape (n_samples, n_classes)
+        Real scores.
+
+    Returns
+    -------
+    ndarray of shape (n_samples, n_classes)
+        Class probabilities.
+    """
+
+    scores = _as_logit_matrix(logits)
+    shifted = scores - np.max(scores, axis=1, keepdims=True)
+    unnormalized = np.exp(shifted)
+    return unnormalized / np.sum(unnormalized, axis=1, keepdims=True)
+
+
+def log_softmax(logits: ArrayLike) -> NDArray[np.float64]:
+    r"""Return the log of :func:`softmax` without forming the probabilities.
+
+    .. math::
+
+        \log \operatorname{softmax}(Z)_{ik}
+        = z_{ik} - \log \sum_{j=1}^{K} e^{z_{ij}}.
+
+    The row maximum is subtracted inside the log-sum-exp.
+
+    Parameters
+    ----------
+    logits : array-like of shape (n_samples, n_classes)
+        Real scores.
+
+    Returns
+    -------
+    ndarray of shape (n_samples, n_classes)
+        Log probabilities.
+    """
+
+    scores = _as_logit_matrix(logits)
+    shifted = scores - np.max(scores, axis=1, keepdims=True)
+    return shifted - np.log(np.sum(np.exp(shifted), axis=1, keepdims=True))
+
+
+class SoftmaxCrossEntropy:
+    r"""Average multinomial negative log-likelihood.
+
+    A label :math:`y` taking values in :math:`\{1, \ldots, K\}` with class
+    probabilities :math:`p = \operatorname{softmax}(z)` has log-likelihood
+    :math:`\sum_k y_k \log p_k`, where :math:`y` is a one-hot (or soft)
+    vector. The training objective is
+
+    .. math::
+
+        J(Z, y)
+        = -\frac{1}{m}\sum_{i=1}^{m}\sum_{k=1}^{K} y_{ik}\log p_{ik},
+        \qquad
+        p_i = \operatorname{softmax}(z_i).
+
+    Differentiating through the normalization produces the same cancellation
+    as Bernoulli logistic regression:
+
+    .. math::
+
+        \frac{\partial J}{\partial Z} = \frac{1}{m}(P - Y).
+
+    :math:`P` and :math:`Y` have shape ``(m, K)``. The factor :math:`1/m`
+    is the derivative of the average over rows, not over classes: each row
+    contributes one log-probability. When :math:`K = 2` and the two score
+    columns differ by a single logit, this is binary cross-entropy.
+
+    Integer labels of shape ``(m,)`` are the class index in
+    ``0, \ldots, K - 1``. A target matrix of shape ``(m, K)`` is a one-hot
+    encoding or a matrix of soft labels whose rows sum to 1.
+    """
+
+    def __call__(self, logits: ArrayLike, y_true: ArrayLike) -> float:
+        """Return :meth:`loss`."""
+
+        return self.loss(logits, y_true)
+
+    @staticmethod
+    def loss(logits: ArrayLike, y_true: ArrayLike) -> float:
+        r"""Return :math:`J = -\frac{1}{m}\sum_i \log p_{i, y_i}`.
+
+        Parameters
+        ----------
+        logits : array-like of shape (n_samples, n_classes)
+            Scores :math:`Z` before the softmax.
+        y_true : array-like of shape (n_samples,) or (n_samples, n_classes)
+            Integer class indices, or a target distribution per row.
+
+        Returns
+        -------
+        float
+            Mean negative log-likelihood.
+        """
+
+        scores = _as_logit_matrix(logits)
+        log_probabilities = log_softmax(scores)
+        targets = _classification_targets(y_true, scores.shape[0], scores.shape[1])
+        if targets.ndim == 1:
+            chosen = log_probabilities[np.arange(scores.shape[0]), targets]
+            return float(-np.mean(chosen))
+        # Row-wise dot of the target distribution with the log probabilities,
+        # then the average over samples.
+        return float(-np.mean(np.sum(targets * log_probabilities, axis=1)))
+
+    @staticmethod
+    def gradient(logits: ArrayLike, y_true: ArrayLike) -> NDArray[np.float64]:
+        r"""Return :math:`\partial J/\partial Z = (P - Y) / m`.
+
+        Parameters
+        ----------
+        logits, y_true : array-like
+            Scores of shape ``(n_samples, n_classes)`` and integer labels
+            or a target matrix.
+
+        Returns
+        -------
+        ndarray of shape (n_samples, n_classes)
+            Gradient in logit space.
+        """
+
+        scores = _as_logit_matrix(logits)
+        probabilities = softmax(scores)
+        targets = _classification_targets(y_true, scores.shape[0], scores.shape[1])
+        if targets.ndim == 1:
+            # Subtract 1 from the true-class column. That is Y in one-hot
+            # form without allocating a dense indicator when labels are indices.
+            probabilities[np.arange(scores.shape[0]), targets] -= 1.0
+            residual = probabilities
+        else:
+            residual = probabilities - targets
+        return residual / scores.shape[0]
+
+
 class HingeLoss:
     r"""Convex surrogate of the 0-1 classification loss.
 
@@ -449,6 +599,21 @@ def binary_cross_entropy_with_logits_gradient(
     return BinaryCrossEntropy.gradient_with_logits(logits, y_true)
 
 
+def softmax_cross_entropy(logits: ArrayLike, y_true: ArrayLike) -> float:
+    """Return :meth:`SoftmaxCrossEntropy.loss`."""
+
+    return SoftmaxCrossEntropy.loss(logits, y_true)
+
+
+def softmax_cross_entropy_gradient(
+    logits: ArrayLike,
+    y_true: ArrayLike,
+) -> NDArray[np.float64]:
+    """Return :meth:`SoftmaxCrossEntropy.gradient`."""
+
+    return SoftmaxCrossEntropy.gradient(logits, y_true)
+
+
 def hinge_loss(y_pred: ArrayLike, y_true: ArrayLike) -> float:
     """Return :meth:`HingeLoss.loss`."""
 
@@ -459,6 +624,60 @@ def hinge_loss_gradient(y_pred: ArrayLike, y_true: ArrayLike) -> NDArray[np.floa
     """Return :meth:`HingeLoss.gradient`."""
 
     return HingeLoss.gradient(y_pred, y_true)
+
+
+def _as_logit_matrix(logits: ArrayLike) -> NDArray[np.float64]:
+    """Return scores as a finite array of shape ``(n_samples, n_classes)``."""
+
+    scores = np.asarray(logits, dtype=np.float64)
+    if scores.ndim != 2 or scores.shape[0] < 1 or scores.shape[1] < 1:
+        raise ValueError(
+            "Logits must have shape (n_samples, n_classes); "
+            f"got {scores.shape}."
+        )
+    if not np.isfinite(scores).all():
+        raise ValueError("Logits must be finite.")
+    return scores
+
+
+def _classification_targets(
+    y_true: ArrayLike,
+    n_samples: int,
+    n_classes: int,
+) -> NDArray[np.int64] | NDArray[np.float64]:
+    """Return integer codes ``(n_samples,)`` or a distribution ``(n_samples, n_classes)``."""
+
+    targets = np.asarray(y_true)
+    if targets.ndim == 2 and targets.shape[1] == 1:
+        targets = targets.reshape(-1)
+    if targets.ndim == 1:
+        if targets.shape[0] != n_samples:
+            raise ValueError(
+                "Integer labels must have one entry per row. "
+                f"Got {targets.shape[0]} labels and {n_samples} rows."
+            )
+        if targets.dtype.kind == "f" and not np.all(targets == np.floor(targets)):
+            raise ValueError("Class indices must be integers.")
+        codes = targets.astype(np.int64, copy=False)
+        if np.any(codes < 0) or np.any(codes >= n_classes):
+            raise ValueError(
+                f"Class indices must lie in 0..{n_classes - 1}."
+            )
+        return codes
+    if targets.ndim == 2 and targets.shape == (n_samples, n_classes):
+        distribution = targets.astype(np.float64, copy=False)
+        if not np.isfinite(distribution).all():
+            raise ValueError("Target distributions must be finite.")
+        if np.any(distribution < 0.0):
+            raise ValueError("Target distributions must be nonnegative.")
+        row_sums = distribution.sum(axis=1)
+        if not np.allclose(row_sums, 1.0):
+            raise ValueError("Each target row must sum to 1.")
+        return distribution
+    raise ValueError(
+        "Targets must have shape (n_samples,) or (n_samples, n_classes). "
+        f"Got {targets.shape}."
+    )
 
 
 def _align(

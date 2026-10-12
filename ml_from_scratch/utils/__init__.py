@@ -1,5 +1,6 @@
 """Data handling and evaluation utilities built only on NumPy."""
 
+from .cross_validation import cross_val_score, k_fold_split
 from .data_manipulation import (
     StandardScaler,
     add_intercept,
@@ -20,8 +21,10 @@ __all__ = [
     "StandardScaler",
     "accuracy_score",
     "add_intercept",
+    "cross_val_score",
     "confusion_matrix",
     "f1_score",
+    "k_fold_split",
     "precision_score",
     "r2_score",
     "recall_score",
