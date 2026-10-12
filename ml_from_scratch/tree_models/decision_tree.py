@@ -218,7 +218,8 @@ class DecisionTreeClassifier:
 
     Inside one feature the class counts of every threshold are prefixes of
     a single cumulative sum of the label indicators, after the column is
-    sorted. The loop in the search runs over features, because each
+    sorted. The loop in the search runs over the columns returned by
+    :meth:`_candidate_features`. The default is every column, because each
     feature has its own order. It does not run over rows.
 
     Parameters
@@ -475,9 +476,11 @@ class DecisionTreeClassifier:
         n_rows = int(codes.size)
         best_gain = 0.0
         best: tuple[int, float, float] | None = None
-        # One pass per column. The ordering that makes prefix counts equal
-        # the left side of a threshold is different for every feature.
-        for feature in range(features.shape[1]):
+        # One pass per candidate column. The ordering that makes prefix
+        # counts equal the left side of a threshold is different for every
+        # feature, so the columns cannot share a sort.
+        for feature in self._candidate_features(int(features.shape[1])):
+            feature = int(feature)
             column = features[:, feature]
             order = np.argsort(column, kind="mergesort")
             sorted_values = column[order]
@@ -524,6 +527,16 @@ class DecisionTreeClassifier:
                 best_gain = chosen_gain
                 best = (feature, threshold, chosen_gain)
         return best
+
+    def _candidate_features(self, n_features: int) -> NDArray[np.int64]:
+        """Return every column index, in increasing order.
+
+        A subclass can draw a subset without replacement. Indices must be
+        valid columns of ``X``. Returning them in increasing order keeps
+        the smallest-index tie break of the full search.
+        """
+
+        return np.arange(n_features, dtype=np.int64)
 
     def _fill_probabilities(
         self,
